@@ -1,10 +1,11 @@
-from langchain.prompts import ChatPromptTemplate
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.document_loaders import UnstructuredFileLoader
 from langchain.embeddings import CacheBackedEmbeddings, OpenAIEmbeddings
 from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
 from langchain.storage import LocalFileStore
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.vectorstores.faiss import FAISS
+from langchain.memory import ConversationSummaryBufferMemory
 from langchain.chat_models import ChatOpenAI
 from langchain.callbacks.base import BaseCallbackHandler
 import streamlit as st
@@ -37,6 +38,14 @@ llm = ChatOpenAI(
     ],
 )
 
+memory = ConversationSummaryBufferMemory(
+    llm=llm,
+    max_token_limit=120,
+    return_messages=True,
+)
+
+def load_memory(_):
+    return memory.load_memory_variables({})["history"]
 
 @st.cache_data(show_spinner="Embedding file...")
 def embed_file(file):
@@ -82,21 +91,20 @@ def paint_history():
 def format_docs(docs):
     return "\n\n".join(document.page_content for document in docs)
 
-
 prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
             """
-            Answer the question using ONLY the following context. If you don't know the answer just say you don't know. DON'T make anything up.
-            
+            Answer the question using ONLY the following context. If you don't know the answer, just say you don't know. DON'T make anything up.
+
             Context: {context}
             """,
         ),
+        MessagesPlaceholder(variable_name="history"),
         ("human", "{question}"),
     ]
 )
-
 
 st.title("DocumentGPT")
 
@@ -123,17 +131,25 @@ if file:
     message = st.chat_input("Ask anything about your file...")
     if message:
         send_message(message, "human")
+        
         chain = (
             {
                 "context": retriever | RunnableLambda(format_docs),
-                "question": RunnablePassthrough(),
+                "history": RunnablePassthrough.assign(history=load_memory),
             }
             | prompt
             | llm
         )
+        
+        st.write(prompt)
         with st.chat_message("ai"):
-            chain.invoke(message)
+            result = chain.invoke({"question": message})
+            memory.save_context(
+                {"input": message},
+                {"output": result.content},
+            )
 
 
 else:
     st.session_state["messages"] = []
+    memory.clear()
